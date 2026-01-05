@@ -1,2 +1,12 @@
 server:
   port: 8080
+
+downstream:
+  base-url: http://localhost:8081
+  path: /echo
+  source-header: from
+  default-source: gateway
+  forwarded-keys:
+    - bbb
+  additional-fields:
+    bbb: BBB
