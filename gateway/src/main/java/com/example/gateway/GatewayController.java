@@ -4,6 +4,10 @@ import java.net.ConnectException;
 import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -12,6 +16,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.MediaType;
 import org.springframework.util.CollectionUtils;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,6 +25,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
 
 import com.example.gateway.config.DownstreamProperties;
 
@@ -38,12 +44,13 @@ public class GatewayController {
     }
 
     @PostMapping(value = "/gateway/process", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public Mono<Map<String, Object>> process(
+    public Mono<ResponseEntity<Map<String, Object>>> process(
             @RequestHeader HttpHeaders headers,
             @RequestBody(required = false) Map<String, Object> body) {
 
-        Map<String, Object> incomingBody = body == null ? Collections.emptyMap() : body;
-        Map<String, Object> outgoingBody = buildOutgoingBody(incomingBody);
+        Map<String, Object> incoming = body == null ? Collections.emptyMap() : body;
+        Map<String, Object> requestHead = extractSection(incoming, "head");
+        Map<String, Object> outgoingBody = buildOutgoingBody(incoming);
         String source = resolveSource(headers);
 
         return webClient.post()
@@ -53,15 +60,31 @@ public class GatewayController {
                 .bodyValue(outgoingBody)
                 .retrieve()
                 .bodyToMono(Map.class)
-                .onErrorResume(this::mapError);
+                .map(downstreamResponse -> buildResponse(headers, requestHead, downstreamResponse, null))
+                .onErrorResume(error -> Mono.just(buildResponse(headers, requestHead, Collections.emptyMap(), error)));
     }
 
-    private Map<String, Object> buildOutgoingBody(Map<String, Object> incomingBody) {
-        Map<String, Object> filtered = filterBodyByWhitelist(incomingBody, downstreamProperties.getForwardedKeys());
+    private Map<String, Object> extractSection(Map<String, Object> incoming, String key) {
+        Object section = incoming.get(key);
+        if (section instanceof Map) {
+            return new LinkedHashMap<>((Map<String, Object>) section);
+        }
+        return new LinkedHashMap<>();
+    }
+
+    private Map<String, Object> buildOutgoingBody(Map<String, Object> incoming) {
+        Map<String, Object> incomingHead = extractSection(incoming, "head");
+        Map<String, Object> incomingPayload = extractSection(incoming, "body");
+
+        Map<String, Object> filtered = filterBodyByWhitelist(incomingPayload, downstreamProperties.getForwardedKeys());
 
         Map<String, Object> merged = new LinkedHashMap<>(filtered);
         merged.putAll(downstreamProperties.getAdditionalFields());
-        return merged;
+
+        Map<String, Object> outgoing = new LinkedHashMap<>();
+        outgoing.put("head", incomingHead);
+        outgoing.put("body", merged);
+        return outgoing;
     }
 
     private Map<String, Object> filterBodyByWhitelist(Map<String, Object> body, Set<String> whitelist) {
@@ -83,14 +106,81 @@ public class GatewayController {
         return headerValue != null ? headerValue : downstreamProperties.getDefaultSource();
     }
 
-    private Mono<Map<String, Object>> mapError(Throwable throwable) {
-        if (isConnectionFailure(throwable)) {
-            return Mono.just(Collections.singletonMap("error", "ERR01"));
+    private ResponseEntity<Map<String, Object>> buildResponse(HttpHeaders requestHeaders,
+                                                              Map<String, Object> requestHead,
+                                                              Map<String, Object> downstreamResponse,
+                                                              Throwable error) {
+        Map<String, Object> head = buildResponseHead(requestHead);
+        Map<String, Object> errorSection = buildErrorSection(downstreamResponse, error);
+
+        Map<String, Object> responseBody = new LinkedHashMap<>();
+        responseBody.put("head", head);
+        responseBody.put("error", errorSection);
+
+        return ResponseEntity
+                .ok()
+                .headers(copyHeaders(requestHeaders))
+                .body(responseBody);
+    }
+
+    private Map<String, Object> buildResponseHead(Map<String, Object> requestHead) {
+        Map<String, Object> head = new LinkedHashMap<>(requestHead);
+        head.put("responseDate", LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE));
+        head.put("responseTime", LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")));
+        return head;
+    }
+
+    private Map<String, Object> buildErrorSection(Map<String, Object> downstreamResponse, Throwable error) {
+        if (error != null) {
+            return buildGatewayError(error);
         }
-        if (isDownstreamTimeout(throwable)) {
-            return Mono.just(Collections.singletonMap("error", "ERR02"));
+        Map<String, Object> downstreamError = extractError(downstreamResponse);
+        if (downstreamError.containsKey("errCode")) {
+            return downstreamError;
         }
-        return Mono.error(throwable);
+        Map<String, Object> success = new LinkedHashMap<>();
+        success.put("errCode", "AAAAAA");
+        success.put("errMessage", "success");
+        return success;
+    }
+
+    private Map<String, Object> buildGatewayError(Throwable error) {
+        Map<String, Object> err = new LinkedHashMap<>();
+        if (isConnectionFailure(error)) {
+            err.put("errCode", "ERR01");
+            err.put("errMessage", "downstream connection failed");
+            return err;
+        }
+        if (isDownstreamTimeout(error)) {
+            err.put("errCode", "ERR02");
+            err.put("errMessage", "downstream response timeout");
+            return err;
+        }
+        err.put("errCode", "ERR02");
+        err.put("errMessage", error.getMessage() == null ? "downstream error" : error.getMessage());
+        return err;
+    }
+
+    private Map<String, Object> extractError(Map<String, Object> downstreamResponse) {
+        if (downstreamResponse == null) {
+            return Collections.emptyMap();
+        }
+        Object nestedError = downstreamResponse.get("error");
+        if (nestedError instanceof Map) {
+            return new LinkedHashMap<>((Map<String, Object>) nestedError);
+        }
+        Map<String, Object> err = new LinkedHashMap<>();
+        if (downstreamResponse.containsKey("errCode")) {
+            err.put("errCode", downstreamResponse.get("errCode"));
+            err.put("errMessage", downstreamResponse.getOrDefault("errMessage", ""));
+        }
+        return err;
+    }
+
+    private HttpHeaders copyHeaders(HttpHeaders headers) {
+        HttpHeaders responseHeaders = new HttpHeaders();
+        headers.forEach((key, values) -> responseHeaders.put(key, new ArrayList<>(values)));
+        return responseHeaders;
     }
 
     private boolean isConnectionFailure(Throwable throwable) {
