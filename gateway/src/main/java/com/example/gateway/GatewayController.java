@@ -4,10 +4,11 @@ import java.net.ConnectException;
 import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
+import java.io.IOException;
+import java.nio.charset.Charset;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -17,20 +18,20 @@ import java.util.Set;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
-import org.springframework.core.ParameterizedTypeReference;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpHeaders;
 import org.springframework.util.CollectionUtils;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClient;
-import org.springframework.web.reactive.function.client.WebClientRequestException;
 
 import com.example.gateway.config.DownstreamProperties;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import io.netty.handler.timeout.ReadTimeoutException;
 import reactor.core.publisher.Mono;
@@ -41,10 +42,12 @@ public class GatewayController {
 
     private final WebClient webClient;
     private final DownstreamProperties downstreamProperties;
+    private final ObjectMapper objectMapper;
 
-    public GatewayController(WebClient webClient, DownstreamProperties downstreamProperties) {
+    public GatewayController(WebClient webClient, DownstreamProperties downstreamProperties, ObjectMapper objectMapper) {
         this.webClient = webClient;
         this.downstreamProperties = downstreamProperties;
+        this.objectMapper = objectMapper;
     }
 
     @PostMapping(value = "/gateway/process", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -56,14 +59,26 @@ public class GatewayController {
         Map<String, Object> requestHead = extractSection(incoming, "head");
         Map<String, Object> outgoingBody = buildOutgoingBody(incoming);
         String source = resolveSource(headers);
+        MediaType downstreamMediaType = downstreamJsonMediaType();
+
+        byte[] requestPayload;
+        try {
+            requestPayload = encodeRequestBody(outgoingBody);
+        } catch (JsonProcessingException e) {
+            return Mono.just(buildResponse(headers, requestHead, Collections.emptyMap(), e));
+        }
 
         Mono<ResponseEntity<Map<String, Object>>> responseMono = webClient.post()
                 .uri(downstreamProperties.getPath())
-                .headers(clientHeaders -> clientHeaders.set(downstreamProperties.getSourceHeader(), source))
-                .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(outgoingBody)
+                .headers(clientHeaders -> {
+                    clientHeaders.set(downstreamProperties.getSourceHeader(), source);
+                    clientHeaders.setContentType(downstreamMediaType);
+                    clientHeaders.setAccept(Collections.singletonList(downstreamMediaType));
+                })
+                .bodyValue(requestPayload)
                 .retrieve()
-                .bodyToMono(mapTypeReference())
+                .bodyToMono(byte[].class)
+                .map(this::decodeDownstreamResponse)
                 .map(downstreamResponse -> buildResponse(headers, requestHead, downstreamResponse, null))
                 .onErrorResume(error -> Mono.just(buildResponse(headers, requestHead, Collections.emptyMap(), error)));
         return responseMono;
@@ -194,8 +209,26 @@ public class GatewayController {
         return responseHeaders;
     }
 
-    private ParameterizedTypeReference<Map<String, Object>> mapTypeReference() {
-        return new ParameterizedTypeReference<Map<String, Object>>() {};
+    private MediaType downstreamJsonMediaType() {
+        Charset charset = downstreamProperties.getCharset();
+        return new MediaType(MediaType.APPLICATION_JSON, charset);
+    }
+
+    private byte[] encodeRequestBody(Map<String, Object> outgoingBody) throws JsonProcessingException {
+        String json = objectMapper.writeValueAsString(outgoingBody);
+        return json.getBytes(downstreamProperties.getCharset());
+    }
+
+    private Map<String, Object> decodeDownstreamResponse(byte[] downstreamBody) {
+        if (downstreamBody == null || downstreamBody.length == 0) {
+            return Collections.emptyMap();
+        }
+        try {
+            String json = new String(downstreamBody, downstreamProperties.getCharset());
+            return objectMapper.readValue(json, new TypeReference<Map<String, Object>>() {});
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to decode downstream response", e);
+        }
     }
 
     private boolean isConnectionFailure(Throwable throwable) {
