@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.MediaType;
@@ -53,15 +54,16 @@ public class GatewayController {
         Map<String, Object> outgoingBody = buildOutgoingBody(incoming);
         String source = resolveSource(headers);
 
-        return webClient.post()
+        Mono<ResponseEntity<Map<String, Object>>> responseMono = webClient.post()
                 .uri(downstreamProperties.getPath())
                 .headers(clientHeaders -> clientHeaders.set(downstreamProperties.getSourceHeader(), source))
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(outgoingBody)
                 .retrieve()
-                .bodyToMono(Map.class)
+                .bodyToMono(mapTypeReference())
                 .map(downstreamResponse -> buildResponse(headers, requestHead, downstreamResponse, null))
                 .onErrorResume(error -> Mono.just(buildResponse(headers, requestHead, Collections.emptyMap(), error)));
+        return responseMono;
     }
 
     private Map<String, Object> extractSection(Map<String, Object> incoming, String key) {
@@ -181,6 +183,10 @@ public class GatewayController {
         HttpHeaders responseHeaders = new HttpHeaders();
         headers.forEach((key, values) -> responseHeaders.put(key, new ArrayList<>(values)));
         return responseHeaders;
+    }
+
+    private ParameterizedTypeReference<Map<String, Object>> mapTypeReference() {
+        return new ParameterizedTypeReference<Map<String, Object>>() {};
     }
 
     private boolean isConnectionFailure(Throwable throwable) {
