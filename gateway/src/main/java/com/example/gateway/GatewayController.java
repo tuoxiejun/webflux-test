@@ -9,7 +9,9 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeoutException;
@@ -35,6 +37,7 @@ import reactor.core.publisher.Mono;
 
 @RestController
 public class GatewayController {
+    private static final Set<String> PASS_THROUGH_HEADER_NAMES = new LinkedHashSet<>(Arrays.asList("traceid", "userid"));
 
     private final WebClient webClient;
     private final DownstreamProperties downstreamProperties;
@@ -180,8 +183,14 @@ public class GatewayController {
     }
 
     private HttpHeaders copyHeaders(HttpHeaders headers) {
-        HttpHeaders responseHeaders = new HttpHeaders();
-        headers.forEach((key, values) -> responseHeaders.put(key, new ArrayList<>(values)));
+        HttpHeaders responseHeaders = HttpHeaders.writableHttpHeaders(new HttpHeaders());
+        headers.forEach((key, values) -> values.forEach(value -> responseHeaders.add(key, value)));
+
+        PASS_THROUGH_HEADER_NAMES.forEach(name -> {
+            if (headers.containsKey(name)) {
+                headers.get(name).forEach(value -> responseHeaders.add(name, value));
+            }
+        });
         return responseHeaders;
     }
 
