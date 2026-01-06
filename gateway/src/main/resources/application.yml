@@ -6,6 +6,10 @@ downstream:
   path: /echo
   source-header: from
   default-source: gateway
+  connect-timeout: 5s
+  response-timeout: 5s
+  max-connections: 50
+  pending-acquire-max-count: 200
   forwarded-keys:
     - bbb
   additional-fields:
