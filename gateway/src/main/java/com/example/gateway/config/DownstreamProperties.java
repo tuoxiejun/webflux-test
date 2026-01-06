@@ -4,6 +4,8 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -60,6 +62,11 @@ public class DownstreamProperties {
      * Maximum number of requests queued while waiting for a connection from the pool.
      */
     private int pendingAcquireMaxCount = 200;
+
+    /**
+     * Character set used by the downstream service for both requests and responses.
+     */
+    private Charset charset = StandardCharsets.UTF_8;
 
     public String getBaseUrl() {
         return baseUrl;
@@ -139,5 +146,13 @@ public class DownstreamProperties {
 
     public void setPendingAcquireMaxCount(int pendingAcquireMaxCount) {
         this.pendingAcquireMaxCount = pendingAcquireMaxCount;
+    }
+
+    public Charset getCharset() {
+        return charset == null ? StandardCharsets.UTF_8 : charset;
+    }
+
+    public void setCharset(Charset charset) {
+        this.charset = charset;
     }
 }
