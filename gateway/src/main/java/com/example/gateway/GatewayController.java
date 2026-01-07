@@ -18,10 +18,15 @@ import java.util.Set;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
+import javax.validation.Valid;
+import javax.validation.constraints.NotBlank;
+import javax.validation.constraints.Size;
+
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.MediaType;
 import org.springframework.http.HttpHeaders;
 import org.springframework.util.CollectionUtils;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -29,6 +34,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import com.example.gateway.config.DownstreamProperties;
+import com.example.gateway.model.GatewayRequest;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -37,6 +43,7 @@ import io.netty.handler.timeout.ReadTimeoutException;
 import reactor.core.publisher.Mono;
 
 @RestController
+@Validated
 public class GatewayController {
     private static final Set<String> PASS_THROUGH_HEADER_NAMES = new LinkedHashSet<>(Arrays.asList("traceid", "userid"));
 
@@ -52,12 +59,13 @@ public class GatewayController {
 
     @PostMapping(value = "/gateway/process", consumes = MediaType.APPLICATION_JSON_VALUE)
     public Mono<ResponseEntity<Map<String, Object>>> process(
+            @RequestHeader("head1") @NotBlank @Size(max = 8) String head1,
+            @RequestHeader("head2") @NotBlank @Size(max = 8) String head2,
             @RequestHeader HttpHeaders headers,
-            @RequestBody(required = false) Map<String, Object> body) {
+            @Valid @RequestBody GatewayRequest body) {
 
-        Map<String, Object> incoming = body == null ? Collections.emptyMap() : body;
-        Map<String, Object> requestHead = extractSection(incoming, "head");
-        Map<String, Object> outgoingBody = buildOutgoingBody(incoming);
+        Map<String, Object> requestHead = convertSection(body.getHead());
+        Map<String, Object> outgoingBody = buildOutgoingBody(body);
         String source = resolveSource(headers);
         MediaType downstreamMediaType = downstreamJsonMediaType();
 
@@ -84,17 +92,17 @@ public class GatewayController {
         return responseMono;
     }
 
-    private Map<String, Object> extractSection(Map<String, Object> incoming, String key) {
-        Object section = incoming.get(key);
-        if (section instanceof Map) {
-            return new LinkedHashMap<>((Map<String, Object>) section);
+    private Map<String, Object> convertSection(Object source) {
+        if (source == null) {
+            return new LinkedHashMap<>();
         }
-        return new LinkedHashMap<>();
+        Map<String, Object> mapped = objectMapper.convertValue(source, new TypeReference<Map<String, Object>>() {});
+        return mapped == null ? new LinkedHashMap<>() : new LinkedHashMap<>(mapped);
     }
 
-    private Map<String, Object> buildOutgoingBody(Map<String, Object> incoming) {
-        Map<String, Object> incomingHead = extractSection(incoming, "head");
-        Map<String, Object> incomingPayload = extractSection(incoming, "body");
+    private Map<String, Object> buildOutgoingBody(GatewayRequest incoming) {
+        Map<String, Object> incomingHead = convertSection(incoming.getHead());
+        Map<String, Object> incomingPayload = convertSection(incoming.getBody());
 
         Map<String, Object> filtered = filterBodyByWhitelist(incomingPayload, downstreamProperties.getForwardedKeys());
 
